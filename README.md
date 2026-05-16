@@ -22,11 +22,11 @@ Every TrustBridge deal creates a **Safe 2-of-2 multisig smart account**. Every v
 ## Live prototype
 
 A working prototype demonstrating the complete 5-screen deal flow is 
-available for review on request. The prototype implements all core security 
+available for review. The prototype implements all core security 
 mechanisms including the ConfirmDeliveryModal, price band breach flow, 
 Adjust Deal audit trail, and dispute mechanism.
 
-To request prototype access: craig@trustbridgeprotocol.xyz
+Prototype access: app.trustbridgeprotocol.xyz
 
 The prototype demonstrates the complete user journey:
 
