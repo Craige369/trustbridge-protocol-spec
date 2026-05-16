@@ -176,7 +176,7 @@ The smart contracts referenced in this specification do not yet exist. This repo
 Dubai, UAE · May 2026
 
 - Web: [trustbridgeprotocol.xyz](https://trustbridgeprotocol.xyz)
-- Prototype: [trust-bridge-secure.base44.app](https://trust-bridge-secure.base44.app)
+- Prototype: [trust-bridge-secure.base44.app](https://app.trustbridgeprotocol.xyz)
 - Grant application: Safe Foundation Spontaneous Grant (in progress)
 
 ---
