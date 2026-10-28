@@ -3,6 +3,8 @@
 **TrustBridge Protocol — Threat Model and Required Defences**
 
 > This document is the security specification for TrustBridge Protocol. It defines known attack vectors, required defences, and immutable security decisions. It is published openly as a signal of intent and to hold the development team accountable to the stated architecture.
+>
+> **Version 2 — October 2026.** Aligned with [SMART_CONTRACT_SPEC.md](SMART_CONTRACT_SPEC.md) v1.1. Dispute resolution removed from v1 (no `resolveDispute()`, no dispute admin key). New rows: fee tier spoofing, stale oracle data, invite-link interception, stranded deposits on cancellation.
 
 ---
 
@@ -29,6 +31,9 @@ This is documented as an immutable design decision. It cannot be removed, bypass
 | **Precision loss / integer overflow** | Rounding errors in fee calculation create exploitable edge cases | Solidity 0.8.x built-in overflow protection. Fee calculation uses basis points (integer arithmetic). | Specified |
 | **Token whitelist bypass** | Attacker uses a malicious ERC-20 token with non-standard behaviour | Approved token whitelist enforced at `createDeal()`. `SafeERC20` handles non-standard tokens including tokens with return value issues. | Specified |
 | **Front-running** | Attacker front-runs `releaseFunds()` to manipulate outcome | 2-of-2 requirement means attacker would need control of one party's wallet. Commit-reveal not required for this architecture. | Acceptable risk |
+| **Fee tier spoofing** | Caller declares a cheaper plan tier to pay a lower fee | Fee tier is never a caller-supplied parameter. It comes from a source the caller cannot set (architecture decision D-04). | Specified in v1.1 |
+| **Stale or failed oracle data** | Chainlink feed is stale or unavailable at release | Staleness and round-completeness checks on every price read. A stale feed blocks the price-dependent action rather than using an old price. Refund at expiry never depends on the oracle. | Specified in v1.1 |
+| **Stranded deposit on cancellation** | Party A cancels after Party B has deposited, and Party B's funds are not returned | `cancelDeal()` and `claimRefund()` return every deposit held, whichever party made it. Covered by invariant tests. | Specified in v1.1 |
 | **Griefing / DoS** | Party A creates many deals to prevent Party B from acting | Gas costs disincentivise spam. Future: rate limiting per address. | Known limitation — to be addressed in v2 |
 
 ---
@@ -41,6 +46,7 @@ This is documented as an immutable design decision. It cannot be removed, bypass
 | **Phishing via typo domain** | Attacker registers trust-bridge.io, trustbr1dge.xyz etc. to harvest wallet signatures | Register defensive domains. HSTS on all TrustBridge domains. EIP-712 signed messages display domain name in wallet — mismatch is immediately visible. | Partially complete — additional domains to be registered before mainnet |
 | **Malicious JS dependency** | Compromised npm package injects malicious code | SRI (Subresource Integrity) hashes on all external scripts. `npm audit` in CI pipeline. Dependabot for dependency updates. Minimal dependency footprint. | To be implemented in Phase 2 |
 | **Fake invite link** | Attacker sends a spoofed invite link pointing to a phishing site | Invite links contain cryptographic deal reference. Party B pre-connection preview shows terms — mismatch between expected and displayed terms is detectable. | Partially implemented — full cryptographic signing in Phase 2 |
+| **Invite link interception** | A third party obtains the invite and accepts the deal before the intended counterparty | Single-use invite token. Party A must confirm the bound wallet before funding is possible, so an unknown acceptor cannot receive funds (architecture decision D-02). | Specified — confirmed before build |
 
 ---
 
@@ -51,7 +57,7 @@ This is documented as an immutable design decision. It cannot be removed, bypass
 | **PlanSwitcher in production** | Prototype-only plan switching tool accidentally left in production build | `PlanSwitcher.jsx` must be removed entirely from production build. Plan determined by authenticated user account only. | Known prototype limitation — documented in Known Limitations Register |
 | **Hardcoded deal IDs** | Prototype uses hardcoded #0042 — collision or confusion in production | Server-generated unique IDs from deal creation events before any production deployment. | Known prototype limitation |
 | **In-memory dealStore** | Prototype state lost on page refresh — audit trail not persisted | Replace dealStore.js with Supabase/PlanetScale backend with row-level security before testnet. Append-only admin audit log. | Known prototype limitation |
-| **Admin key compromise** | Single admin wallet for `resolveDispute()` is a centralisation risk | Multi-sig admin wallet from day one. Kleros decentralised arbitration in v2 removes admin dependency entirely. | Specified — to be implemented |
+| **Admin key compromise** | Attacker gains control of the configuration admin key | Admin powers are limited to configuration (token whitelist, fee wallet, operator registry). No admin function can move, freeze, redirect or delay user funds. Multi-sig admin wallet from day one. There is no dispute admin key in v1. | Specified in v1.1 |
 | **Fee wallet compromise** | Platform fee wallet is a single point of failure | Multi-sig fee wallet. Fee withdrawal requires multiple signatures. | Specified |
 
 ---
@@ -60,8 +66,8 @@ This is documented as an immutable design decision. It cannot be removed, bypass
 
 | Threat | Attack description | Required defence | Status |
 |--------|-------------------|-----------------|--------|
-| **Dust attack** | Attacker creates many tiny deals to pollute state | Minimum deal value enforcement. Gas costs disincentivise at current fee levels. | To be added to `createDeal()` validation |
-| **Dispute abuse** | Party abuses dispute mechanism to delay release | Dispute deposit ($20 flat / 1% above $10K) disincentivises frivolous disputes. 7-day max resolution window. Winner receives dispute deposit back. | Specified and implemented in prototype |
+| **Dust attack** | Attacker creates many tiny deals to pollute state | $10 USD minimum deal value enforced at `createDeal()` against Chainlink. Gas costs disincentivise at current fee levels. | Specified |
+| **Concern spam** | Party raises repeated concerns to pressure the counterparty | "Raise a Concern" is a UI-only timestamped record with no contract call and no effect on funds or deal state. Rate limited to 1 per deal. | Implemented in prototype |
 | **Time manipulation** | Miner manipulates block timestamp to affect expiry | Solidity `block.timestamp` is within ~15 seconds of real time — acceptable for minimum 30-minute deals. Not exploitable at TrustBridge deal durations. | Acceptable risk |
 
 ---
@@ -78,7 +84,14 @@ Both parties must independently verify the exact transaction details before any 
 
 ### 2. Non-custodial architecture — absolute
 
-TrustBridge cannot access, freeze, move, or confiscate user funds under any circumstance. No admin function exists that can override the 2-of-2 requirement while a deal is in `LOCKED` state. The only exceptions are `resolveDispute()` (requires both parties to have filed or been filed against) and `claimRefund()` (permissionless after expiry).
+TrustBridge cannot access, freeze, move, or confiscate user funds under any circumstance. No admin function exists that can override deal logic while a deal is in `LOCKED` state.
+
+Funds move in only three ways, all governed by contract rules agreed at deal creation:
+- **Both parties confirm** — the atomic swap executes
+- **Single-party auto-release** — one party confirms and the other does not respond within the window
+- **Expiry** — `claimRefund()` is permissionless and returns all deposits
+
+There is no dispute resolution function in v1. No person at TrustBridge decides any outcome. Kleros decentralised arbitration is planned for v2.
 
 ### 3. Chainlink oracle — on-chain only
 
@@ -90,7 +103,7 @@ State is always updated before any external call or token transfer. No exception
 
 ### 5. Time-lock auto-refund — no admin override
 
-When the deal timer expires, `claimRefund()` is callable by anyone and returns both deposits automatically. No admin function can prevent this. No admin function can extend the timer after the deal is in `LOCKED` state without both parties' consent.
+When the deal timer expires, `claimRefund()` is callable by anyone and returns both deposits automatically. No admin function can prevent this, and no admin function can extend the timer. The expiry can never be extended by one party alone.
 
 ---
 
@@ -104,7 +117,8 @@ Before any mainnet deployment, TrustBridge Protocol requires a professional secu
 - All fund-moving functions with special attention to reentrancy
 - Fee calculation edge cases
 - Oracle integration and manipulation resistance
-- Access control (admin functions, party-specific functions)
+- Access control (configuration admin functions, party-specific functions) — confirming no admin path to user funds
+- Auto-release path and all refund and cancellation paths, including partial-funding states
 - Event emission completeness
 
 **Required audit firms:** CertiK, Trail of Bits, OpenZeppelin, or equivalent recognised firm. Self-audits are not acceptable.
@@ -130,7 +144,8 @@ The following prototype limitations are security-relevant and must be resolved b
 | Hardcoded deal IDs | No uniqueness guarantee | Server-generated IDs from contract events |
 | PlanSwitcher.jsx present | Any user can switch to Enterprise | Remove entirely from production build |
 | CoinGecko price display | Simulated — not live in prototype | Wire to live CoinGecko API for display; Chainlink for contract logic |
-| No KYC threshold enforcement | Deals above UAE VARA threshold not flagged | KYC process design required before Pro plan mainnet |
+| No KYC threshold enforcement | Deals above UAE VARA threshold not flagged | KYC process design required before Pro plan mainnet. Where the check is enforced is architecture decision D-05 |
+| Dispute UI code dormant | Legacy dispute screens remain in the codebase, greyed out | Not active in v1. Removed or kept dormant until Kleros integration in v2 |
 
 See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the complete register.
 
@@ -140,18 +155,18 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the complete register.
 
 | Data type | Retention | Storage | Encryption |
 |-----------|-----------|---------|-----------|
-| Deal chat messages | 2 years (completed) / 8 years (disputed) | Supabase (off-chain) | AES-256 at rest |
-| Dispute evidence | 8 years | Supabase (off-chain) | AES-256 + SHA-256 fingerprint |
+| Deal chat messages | 2 years (completed) / 8 years (where a concern was raised) | Supabase (off-chain) | AES-256 at rest |
+| Raise a Concern records | 8 years | Supabase (off-chain) | AES-256 + SHA-256 fingerprint |
 | Platform fee records | 8 years | Append-only audit log | Standard |
 | User email (optional) | Until deletion request | Supabase | Standard |
 | IP addresses | 90 days | Hashed only | SHA-256 |
 | Real identity / KYC | Not collected at MVP | — | — |
 | Behavioural analytics | Never collected | — | — |
 
-All on-chain data is public by nature. Users should be aware that deal creation, deposit, release, and dispute events are permanently visible on the blockchain.
+All on-chain data is public by nature. Users should be aware that deal creation, deposit, release, refund and cancellation events are permanently visible on the blockchain.
 
 ---
 
-*Last updated: May 2026 · TrustBridge Protocol · trustbridgeprotocol.xyz*
+*Version 2 · Last updated: October 2026 · TrustBridge Protocol · trustbridgeprotocol.xyz*
 
 *Responsible disclosure: If you identify a security vulnerability in TrustBridge Protocol, please contact craig@trustbridgeprotocol.xyz before public disclosure. Smart contracts are not yet deployed — there are no live funds at risk in the current prototype.*
